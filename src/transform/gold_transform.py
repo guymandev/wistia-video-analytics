@@ -278,6 +278,130 @@ def build_fact_media_daily_stats(
     return df
 
 
+def build_fact_media_engagement(
+    silver_events_df: pd.DataFrame,
+    media_config_df: pd.DataFrame,
+) -> pd.DataFrame:
+    """
+    Build Gold fact_media_engagement.
+
+    Grain:
+    - One row per Wistia engagement event.
+
+    Natural key:
+    - event_key
+
+    Source:
+    - Silver events
+    - media_config.yaml for channel mapping
+
+    Notes:
+    - This is the main event-level analytics fact table.
+    - Events are media-specific and include media_id, visitor_key, geography,
+      device/browser info, and percent_viewed.
+    """
+    df = silver_events_df.copy()
+
+    selected_columns = [
+        "event_key",
+        "received_at",
+        "visitor_key",
+        "media_hashed_id",
+        "media_name",
+        "media_url",
+        "percent_viewed",
+        "ip_address",
+        "country",
+        "region",
+        "city",
+        "latitude",
+        "longitude",
+        "organization",
+        "email",
+        "embed_url",
+        "conversion_type",
+        "conversion_data_json",
+        "iframe_heatmap_url",
+        "browser",
+        "browser_version",
+        "platform",
+        "is_mobile",
+        "thumbnail_url",
+        "thumbnail_width",
+        "thumbnail_height",
+        "ingest_date",
+        "source_media_id",
+        "source_page",
+    ]
+
+    existing_columns = [column for column in selected_columns if column in df.columns]
+    df = df[existing_columns]
+
+    # Enrich with channel from config/media_config.yaml.
+    df = df.merge(
+        media_config_df[["media_hashed_id", "channel"]],
+        on="media_hashed_id",
+        how="left",
+    )
+
+    # Make date-level analysis easier in Athena and dashboards.
+    df["event_date"] = pd.to_datetime(df["received_at"], errors="coerce", utc=True).dt.date
+
+    # Add a fact key. The event_key itself is already a stable natural key,
+    # but this keeps naming consistent with dimensional modeling conventions.
+    df["media_engagement_key"] = df["event_key"]
+
+    # Defensive dedupe. Silver already dedupes events, but Gold should protect
+    # its own grain as well.
+    before_count = len(df)
+    df = df.drop_duplicates(subset=["event_key"], keep="last")
+    after_count = len(df)
+
+    if before_count != after_count:
+        print(
+            f"Deduplicated Gold fact_media_engagement: "
+            f"{before_count} records before, {after_count} records after."
+        )
+
+    final_columns = [
+        "media_engagement_key",
+        "event_key",
+        "received_at",
+        "event_date",
+        "media_hashed_id",
+        "channel",
+        "visitor_key",
+        "percent_viewed",
+        "ip_address",
+        "country",
+        "region",
+        "city",
+        "latitude",
+        "longitude",
+        "organization",
+        "email",
+        "browser",
+        "browser_version",
+        "platform",
+        "is_mobile",
+        "embed_url",
+        "media_url",
+        "conversion_type",
+        "conversion_data_json",
+        "iframe_heatmap_url",
+        "thumbnail_url",
+        "thumbnail_width",
+        "thumbnail_height",
+        "ingest_date",
+        "source_page",
+    ]
+
+    final_columns = [column for column in final_columns if column in df.columns]
+    df = df[final_columns]
+
+    return df
+
+
 def run_dim_media_transform(
     silver_base_dir: str | Path,
     gold_base_dir: str | Path,
@@ -338,6 +462,37 @@ def run_fact_media_daily_stats_transform(
     print(f"Columns: {list(fact_media_daily_stats_df.columns)}")
 
 
+def run_fact_media_engagement_transform(
+    silver_base_dir: str | Path,
+    gold_base_dir: str | Path,
+    config_path: str | Path,
+) -> None:
+    """
+    Build and write Gold fact_media_engagement.
+    """
+    silver_base_dir = Path(silver_base_dir)
+    gold_base_dir = Path(gold_base_dir)
+
+    silver_events_path = silver_base_dir / "events" / "data.parquet"
+    gold_fact_media_engagement_path = (
+        gold_base_dir / "fact_media_engagement" / "data.parquet"
+    )
+
+    silver_events_df = read_parquet(silver_events_path)
+    media_config_df = load_media_config(config_path)
+
+    fact_media_engagement_df = build_fact_media_engagement(
+        silver_events_df=silver_events_df,
+        media_config_df=media_config_df,
+    )
+
+    write_parquet(fact_media_engagement_df, gold_fact_media_engagement_path)
+
+    print(f"Wrote Gold fact_media_engagement: {gold_fact_media_engagement_path}")
+    print(f"Rows: {len(fact_media_engagement_df)}")
+    print(f"Columns: {list(fact_media_engagement_df.columns)}")
+
+
 def run_gold_transform(
     silver_base_dir: str | Path,
     gold_base_dir: str | Path,
@@ -349,6 +504,7 @@ def run_gold_transform(
     Currently implemented:
     - dim_media
     - fact_media_daily_stats
+    - fact_media_engagement
     """
     run_dim_media_transform(
         silver_base_dir=silver_base_dir,
@@ -357,6 +513,12 @@ def run_gold_transform(
     )
 
     run_fact_media_daily_stats_transform(
+        silver_base_dir=silver_base_dir,
+        gold_base_dir=gold_base_dir,
+        config_path=config_path,
+    )
+
+    run_fact_media_engagement_transform(
         silver_base_dir=silver_base_dir,
         gold_base_dir=gold_base_dir,
         config_path=config_path,
