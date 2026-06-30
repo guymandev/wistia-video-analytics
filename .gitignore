@@ -1,6 +1,7 @@
 py3_12
 data/raw
 data/silver
+data/gold
 .env
 __pycache__/
 .pytest_cache/
