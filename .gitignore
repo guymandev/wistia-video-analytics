@@ -2,6 +2,7 @@ py3_12
 data/raw
 data/silver
 data/gold
+data/marts
 .env
 __pycache__/
 .pytest_cache/
