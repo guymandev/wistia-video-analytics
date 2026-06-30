@@ -123,6 +123,7 @@ def fetch_events_pages(
     media_id: str,
     headers: Dict[str, str],
     per_page: int = 100,
+    max_pages: Optional[int] = None,
 ) -> Generator[Dict[str, Any], None, None]:
     """
     Fetch paginated event records for a single media ID.
@@ -166,6 +167,9 @@ def fetch_events_pages(
         }
 
         page += 1
+
+        if max_pages is not None and page > max_pages:
+            break
 
 
 def write_json(output_path: str | Path, payload: Any) -> None:
@@ -302,6 +306,7 @@ def ingest_events(
     base_output_dir: str | Path,
     ingest_date: str,
     per_page: int = 100,
+    max_pages: Optional[int] = None,
 ) -> None:
     for media in media_ids:
         media_id = media["media_id"]
@@ -311,6 +316,7 @@ def ingest_events(
             media_id=media_id,
             headers=headers,
             per_page=per_page,
+            max_pages=max_pages,
         ):
             page = page_result["page"]
             records = page_result["records"]
@@ -333,6 +339,7 @@ def run_ingestion(
     api_token: str,
     ingest_date: Optional[str] = None,
     per_page: int = 100,
+    max_pages: Optional[int] = None,
 ) -> None:
     """
     Run the full local raw ingestion pipeline.
@@ -372,6 +379,7 @@ def run_ingestion(
             base_output_dir=base_output_dir,
             ingest_date=ingest_date,
             per_page=per_page,
+            max_pages=max_pages,
         )
 
 
@@ -403,6 +411,13 @@ def parse_args() -> argparse.Namespace:
         help="Number of event records per page.",
     )
 
+    parser.add_argument(
+        "--max-pages",
+        type=int,
+        default=None,
+        help="Optional maximum number of event pages to fetch per media ID.",
+    )
+
     return parser.parse_args()
 
 
@@ -429,6 +444,7 @@ def main() -> None:
         api_token=api_token,
         ingest_date=args.ingest_date,
         per_page=args.per_page,
+        max_pages=args.max_pages,
     )
 
 
