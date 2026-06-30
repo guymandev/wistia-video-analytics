@@ -200,6 +200,83 @@ def build_dim_media(
 
     return df
 
+def build_fact_media_daily_stats(
+    silver_media_stats_df: pd.DataFrame,
+    media_config_df: pd.DataFrame,
+) -> pd.DataFrame:
+    """
+    Build Gold fact_media_daily_stats.
+
+    Grain:
+    - One row per media_hashed_id per ingest_date.
+
+    Source:
+    - Silver media_stats
+    - media_config.yaml for channel mapping
+
+    Notes:
+    - Wistia media stats appear to be cumulative API metrics at time of extraction.
+    - We store them as daily snapshots using ingest_date as snapshot_date.
+    """
+    df = silver_media_stats_df.copy()
+
+    selected_columns = [
+        "media_hashed_id",
+        "load_count",
+        "play_count",
+        "api_play_rate",
+        "calculated_play_rate",
+        "hours_watched",
+        "engagement",
+        "visitor_count",
+        "ingest_date",
+        "source_media_id",
+    ]
+
+    existing_columns = [column for column in selected_columns if column in df.columns]
+    df = df[existing_columns]
+
+    # Enrich with channel from config/media_config.yaml.
+    df = df.merge(
+        media_config_df[["media_hashed_id", "channel"]],
+        on="media_hashed_id",
+        how="left",
+    )
+
+    # In Gold, make the snapshot meaning explicit.
+    df["snapshot_date"] = df["ingest_date"]
+
+    # Optional: daily stats fact key.
+    df["media_daily_stats_key"] = (
+        df["media_hashed_id"].astype(str) + "_" + df["snapshot_date"].astype(str)
+    )
+
+    # One row per media per snapshot date.
+    df = df.drop_duplicates(
+        subset=["media_hashed_id", "snapshot_date"],
+        keep="last",
+    )
+
+    final_columns = [
+        "media_daily_stats_key",
+        "media_hashed_id",
+        "channel",
+        "snapshot_date",
+        "load_count",
+        "play_count",
+        "api_play_rate",
+        "calculated_play_rate",
+        "hours_watched",
+        "engagement",
+        "visitor_count",
+        "ingest_date",
+    ]
+
+    final_columns = [column for column in final_columns if column in df.columns]
+    df = df[final_columns]
+
+    return df
+
 
 def run_dim_media_transform(
     silver_base_dir: str | Path,
@@ -230,6 +307,37 @@ def run_dim_media_transform(
     print(f"Columns: {list(dim_media_df.columns)}")
 
 
+def run_fact_media_daily_stats_transform(
+    silver_base_dir: str | Path,
+    gold_base_dir: str | Path,
+    config_path: str | Path,
+) -> None:
+    """
+    Build and write Gold fact_media_daily_stats.
+    """
+    silver_base_dir = Path(silver_base_dir)
+    gold_base_dir = Path(gold_base_dir)
+
+    silver_media_stats_path = silver_base_dir / "media_stats" / "data.parquet"
+    gold_fact_media_daily_stats_path = (
+        gold_base_dir / "fact_media_daily_stats" / "data.parquet"
+    )
+
+    silver_media_stats_df = read_parquet(silver_media_stats_path)
+    media_config_df = load_media_config(config_path)
+
+    fact_media_daily_stats_df = build_fact_media_daily_stats(
+        silver_media_stats_df=silver_media_stats_df,
+        media_config_df=media_config_df,
+    )
+
+    write_parquet(fact_media_daily_stats_df, gold_fact_media_daily_stats_path)
+
+    print(f"Wrote Gold fact_media_daily_stats: {gold_fact_media_daily_stats_path}")
+    print(f"Rows: {len(fact_media_daily_stats_df)}")
+    print(f"Columns: {list(fact_media_daily_stats_df.columns)}")
+
+
 def run_gold_transform(
     silver_base_dir: str | Path,
     gold_base_dir: str | Path,
@@ -240,8 +348,15 @@ def run_gold_transform(
 
     Currently implemented:
     - dim_media
+    - fact_media_daily_stats
     """
     run_dim_media_transform(
+        silver_base_dir=silver_base_dir,
+        gold_base_dir=gold_base_dir,
+        config_path=config_path,
+    )
+
+    run_fact_media_daily_stats_transform(
         silver_base_dir=silver_base_dir,
         gold_base_dir=gold_base_dir,
         config_path=config_path,
