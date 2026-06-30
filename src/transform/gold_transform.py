@@ -402,6 +402,236 @@ def build_fact_media_engagement(
     return df
 
 
+def build_dim_visitor(
+    silver_events_df: pd.DataFrame,
+    silver_visitors_df: pd.DataFrame | None = None,
+) -> pd.DataFrame:
+    """
+    Build Gold dim_visitor.
+
+    Grain:
+    - One row per visitor_key.
+
+    Source:
+    - Silver events as the primary source.
+    - Silver visitors as optional supplemental enrichment.
+
+    Notes:
+    - During API exploration, the visitors endpoint appeared to return
+      account-level visitor summaries rather than media-specific visitor data.
+    - Therefore, media-specific visitor behavior is derived from events.
+    """
+    events_df = silver_events_df.copy()
+
+    if events_df.empty:
+        return pd.DataFrame()
+
+    required_columns = [
+        "visitor_key",
+        "received_at",
+        "media_hashed_id",
+        "percent_viewed",
+        "ip_address",
+        "country",
+        "region",
+        "city",
+        "latitude",
+        "longitude",
+        "organization",
+        "email",
+        "browser",
+        "browser_version",
+        "platform",
+        "is_mobile",
+        "ingest_date",
+    ]
+
+    existing_columns = [column for column in required_columns if column in events_df.columns]
+    events_df = events_df[existing_columns]
+
+    events_df["received_at"] = pd.to_datetime(
+        events_df["received_at"],
+        errors="coerce",
+        utc=True,
+    )
+
+    if "percent_viewed" in events_df.columns:
+        events_df["percent_viewed"] = pd.to_numeric(
+            events_df["percent_viewed"],
+            errors="coerce",
+        )
+
+    # Sort so "last" values are based on latest observed event.
+    events_df = events_df.sort_values(["visitor_key", "received_at"])
+
+    aggregation_spec = {
+        "received_at": ["min", "max"],
+        "media_hashed_id": pd.Series.nunique,
+        "percent_viewed": ["count", "mean", "max"],
+        "ip_address": "last",
+        "country": "last",
+        "region": "last",
+        "city": "last",
+        "latitude": "last",
+        "longitude": "last",
+        "organization": "last",
+        "email": "last",
+        "browser": "last",
+        "browser_version": "last",
+        "platform": "last",
+        "is_mobile": "last",
+        "ingest_date": "last",
+    }
+
+    # Only aggregate columns that actually exist.
+    aggregation_spec = {
+        column: agg_func
+        for column, agg_func in aggregation_spec.items()
+        if column in events_df.columns
+    }
+
+    dim_visitor_df = events_df.groupby("visitor_key", dropna=False).agg(aggregation_spec)
+
+    # Flatten MultiIndex columns created by aggregation.
+    dim_visitor_df.columns = [
+        "_".join(column_parts).strip("_")
+        if isinstance(column_parts, tuple)
+        else column_parts
+        for column_parts in dim_visitor_df.columns
+    ]
+
+    dim_visitor_df = dim_visitor_df.reset_index()
+
+    rename_map = {
+        "received_at_min": "first_seen_at",
+        "received_at_max": "last_seen_at",
+        "media_hashed_id_nunique": "media_count",
+        "percent_viewed_count": "event_count",
+        "percent_viewed_mean": "avg_percent_viewed",
+        "percent_viewed_max": "max_percent_viewed",
+        "ip_address_last": "ip_address",
+        "country_last": "country",
+        "region_last": "region",
+        "city_last": "city",
+        "latitude_last": "latitude",
+        "longitude_last": "longitude",
+        "organization_last": "organization",
+        "email_last": "email",
+        "browser_last": "browser",
+        "browser_version_last": "browser_version",
+        "platform_last": "platform",
+        "is_mobile_last": "is_mobile",
+        "ingest_date_last": "ingest_date",
+    }
+
+    dim_visitor_df = dim_visitor_df.rename(columns=rename_map)
+
+    # Optional enrichment from the visitors endpoint.
+    # We only use it to fill missing fields, not to override event-derived data.
+    if silver_visitors_df is not None and not silver_visitors_df.empty:
+        visitors_df = silver_visitors_df.copy()
+
+        visitor_enrichment_columns = [
+            "visitor_key",
+            "visitor_email",
+            "visitor_org_name",
+            "browser",
+            "browser_version",
+            "platform",
+            "is_mobile",
+            "created_at",
+            "last_active_at",
+            "load_count",
+            "play_count",
+        ]
+
+        existing_visitor_columns = [
+            column for column in visitor_enrichment_columns if column in visitors_df.columns
+        ]
+
+        visitors_df = visitors_df[existing_visitor_columns]
+        visitors_df = visitors_df.drop_duplicates(subset=["visitor_key"], keep="last")
+
+        dim_visitor_df = dim_visitor_df.merge(
+            visitors_df,
+            on="visitor_key",
+            how="left",
+            suffixes=("", "_visitor_summary"),
+        )
+
+        if "email" in dim_visitor_df.columns and "visitor_email" in dim_visitor_df.columns:
+            dim_visitor_df["email"] = dim_visitor_df["email"].fillna(
+                dim_visitor_df["visitor_email"]
+            )
+
+        if "organization" in dim_visitor_df.columns and "visitor_org_name" in dim_visitor_df.columns:
+            dim_visitor_df["organization"] = dim_visitor_df["organization"].fillna(
+                dim_visitor_df["visitor_org_name"]
+            )
+
+        for column in ["browser", "browser_version", "platform", "is_mobile"]:
+            summary_column = f"{column}_visitor_summary"
+            if column in dim_visitor_df.columns and summary_column in dim_visitor_df.columns:
+                dim_visitor_df[column] = dim_visitor_df[column].fillna(
+                    dim_visitor_df[summary_column]
+                )
+
+        # Use visitors endpoint timestamps only as fallback.
+        if "created_at" in dim_visitor_df.columns:
+            dim_visitor_df["created_at"] = pd.to_datetime(
+                dim_visitor_df["created_at"],
+                errors="coerce",
+                utc=True,
+            )
+            dim_visitor_df["first_seen_at"] = dim_visitor_df["first_seen_at"].fillna(
+                dim_visitor_df["created_at"]
+            )
+
+        if "last_active_at" in dim_visitor_df.columns:
+            dim_visitor_df["last_active_at"] = pd.to_datetime(
+                dim_visitor_df["last_active_at"],
+                errors="coerce",
+                utc=True,
+            )
+            dim_visitor_df["last_seen_at"] = dim_visitor_df["last_seen_at"].fillna(
+                dim_visitor_df["last_active_at"]
+            )
+
+    dim_visitor_df["visitor_key_dim"] = dim_visitor_df["visitor_key"]
+
+    final_columns = [
+        "visitor_key_dim",
+        "visitor_key",
+        "email",
+        "ip_address",
+        "country",
+        "region",
+        "city",
+        "latitude",
+        "longitude",
+        "organization",
+        "browser",
+        "browser_version",
+        "platform",
+        "is_mobile",
+        "first_seen_at",
+        "last_seen_at",
+        "event_count",
+        "avg_percent_viewed",
+        "max_percent_viewed",
+        "media_count",
+        "ingest_date",
+    ]
+
+    final_columns = [
+        column for column in final_columns if column in dim_visitor_df.columns
+    ]
+
+    dim_visitor_df = dim_visitor_df[final_columns]
+
+    return dim_visitor_df
+
+
 def run_dim_media_transform(
     silver_base_dir: str | Path,
     gold_base_dir: str | Path,
@@ -493,6 +723,39 @@ def run_fact_media_engagement_transform(
     print(f"Columns: {list(fact_media_engagement_df.columns)}")
 
 
+def run_dim_visitor_transform(
+    silver_base_dir: str | Path,
+    gold_base_dir: str | Path,
+) -> None:
+    """
+    Build and write Gold dim_visitor.
+    """
+    silver_base_dir = Path(silver_base_dir)
+    gold_base_dir = Path(gold_base_dir)
+
+    silver_events_path = silver_base_dir / "events" / "data.parquet"
+    silver_visitors_path = silver_base_dir / "visitors" / "data.parquet"
+    gold_dim_visitor_path = gold_base_dir / "dim_visitor" / "data.parquet"
+
+    silver_events_df = read_parquet(silver_events_path)
+
+    if silver_visitors_path.exists():
+        silver_visitors_df = read_parquet(silver_visitors_path)
+    else:
+        silver_visitors_df = None
+
+    dim_visitor_df = build_dim_visitor(
+        silver_events_df=silver_events_df,
+        silver_visitors_df=silver_visitors_df,
+    )
+
+    write_parquet(dim_visitor_df, gold_dim_visitor_path)
+
+    print(f"Wrote Gold dim_visitor: {gold_dim_visitor_path}")
+    print(f"Rows: {len(dim_visitor_df)}")
+    print(f"Columns: {list(dim_visitor_df.columns)}")
+
+
 def run_gold_transform(
     silver_base_dir: str | Path,
     gold_base_dir: str | Path,
@@ -505,6 +768,7 @@ def run_gold_transform(
     - dim_media
     - fact_media_daily_stats
     - fact_media_engagement
+    - dim_visitor
     """
     run_dim_media_transform(
         silver_base_dir=silver_base_dir,
@@ -522,6 +786,11 @@ def run_gold_transform(
         silver_base_dir=silver_base_dir,
         gold_base_dir=gold_base_dir,
         config_path=config_path,
+    )
+
+    run_dim_visitor_transform(
+        silver_base_dir=silver_base_dir,
+        gold_base_dir=gold_base_dir,
     )
 
 
