@@ -25,6 +25,7 @@ from src.ingest.wistia_ingest import run_ingestion
 from src.transform.gold_transform import run_gold_transform
 from src.transform.mart_transform import run_mart_transform
 from src.transform.silver_transform import run_silver_transform
+from src.quality.validate_outputs import run_validation
 
 
 def validate_path_exists(path: str | Path, description: str) -> None:
@@ -58,6 +59,7 @@ def run_local_pipeline(
     per_page: int = 100,
     max_pages: Optional[int] = None,
     skip_ingestion: bool = False,
+    run_quality_checks: bool = True,
 ) -> None:
     """
     Run the complete local Wistia analytics pipeline.
@@ -112,6 +114,20 @@ def run_local_pipeline(
         gold_base_dir=gold_output_dir,
         mart_base_dir=mart_output_dir,
     )
+
+    if run_quality_checks:
+        print_section("STEP 5: DATA QUALITY VALIDATION")
+
+        validation_passed = run_validation(
+            gold_base_dir=gold_output_dir,
+            mart_base_dir=mart_output_dir,
+        )
+
+        if not validation_passed:
+            raise ValueError("Data quality validation failed.")
+
+    else:
+        print_section("STEP 5: DATA QUALITY VALIDATION SKIPPED")
 
     print_section("LOCAL PIPELINE COMPLETE")
 
@@ -188,6 +204,12 @@ def parse_args() -> argparse.Namespace:
         help="Skip Wistia API calls and reuse existing local raw files.",
     )
 
+    parser.add_argument(
+        "--skip-validation",
+        action="store_true",
+        help="Skip Gold and Mart data quality validation checks.",
+    )
+
     return parser.parse_args()
 
 
@@ -223,6 +245,7 @@ def main() -> None:
         per_page=args.per_page,
         max_pages=args.max_pages,
         skip_ingestion=args.skip_ingestion,
+        run_quality_checks=not args.skip_validation,
     )
 
 
