@@ -19,11 +19,14 @@ import json
 import os
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, Generator, Iterable, List, Optional
+from typing import Any, Dict, Generator, Iterable, List, Optional, Tuple, Union
 
 import requests
 import yaml
-from dotenv import load_dotenv
+try:
+    from dotenv import load_dotenv
+except ImportError:
+    load_dotenv = None
 
 from urllib.parse import urlparse
 
@@ -33,7 +36,7 @@ import boto3
 BASE_URL = "https://api.wistia.com/v1"
 
 
-def load_media_config(config_path: str | Path) -> List[Dict[str, Any]]:
+def load_media_config(config_path: Union[str, Path]) -> List[Dict[str, Any]]:
     """
     Load media configuration from YAML.
 
@@ -146,14 +149,14 @@ def build_events_url() -> str:
     return f"{BASE_URL}/stats/events.json"
 
 
-def is_s3_path(path: str | Path) -> bool:
+def is_s3_path(path: Union[str, Path]) -> bool:
     """
     Return True if the provided path is an S3 URI.
     """
     return str(path).startswith("s3://")
 
 
-def parse_s3_uri(s3_uri: str | Path) -> tuple[str, str]:
+def parse_s3_uri(s3_uri: Union[str, Path]) -> Tuple[str, str]:
     """
     Parse an S3 URI into bucket and key.
 
@@ -253,7 +256,7 @@ def fetch_events_pages(
             break
 
 
-def write_json(output_path: str | Path, payload: Any) -> None:
+def write_json(output_path: Union[str, Path], payload: Any) -> None:
     """
     Write JSON payload to either local disk or S3.
 
@@ -285,12 +288,12 @@ def write_json(output_path: str | Path, payload: Any) -> None:
 
 
 def get_raw_output_path(
-    base_dir: str | Path,
+    base_dir: Union[str, Path],
     endpoint_name: str,
     ingest_date: str,
     media_id: Optional[str] = None,
     page: Optional[int] = None,
-) -> str | Path:
+) -> Union[str, Path]:
     """
     Build the raw output path for either local storage or S3.
 
@@ -335,7 +338,7 @@ def ingest_media_metadata(
     session: requests.Session,
     media_ids: Iterable[Dict[str, Any]],
     headers: Dict[str, str],
-    base_output_dir: str | Path,
+    base_output_dir: Union[str, Path],
     ingest_date: str,
 ) -> None:
     for media in media_ids:
@@ -359,7 +362,7 @@ def ingest_media_stats(
     session: requests.Session,
     media_ids: Iterable[Dict[str, Any]],
     headers: Dict[str, str],
-    base_output_dir: str | Path,
+    base_output_dir: Union[str, Path],
     ingest_date: str,
 ) -> None:
     for media in media_ids:
@@ -382,7 +385,7 @@ def ingest_media_stats(
 def ingest_visitors(
     session: requests.Session,
     headers: Dict[str, str],
-    base_output_dir: str | Path,
+    base_output_dir: Union[str, Path],
     ingest_date: str,
 ) -> None:
     """
@@ -411,7 +414,7 @@ def ingest_events(
     session: requests.Session,
     media_ids: Iterable[Dict[str, Any]],
     headers: Dict[str, str],
-    base_output_dir: str | Path,
+    base_output_dir: Union[str, Path],
     ingest_date: str,
     per_page: int = 100,
     max_pages: Optional[int] = None,
@@ -442,8 +445,8 @@ def ingest_events(
 
 
 def run_ingestion(
-    config_path: str | Path,
-    base_output_dir: str | Path,
+    config_path: Union[str, Path],
+    base_output_dir: Union[str, Path],
     api_token: str,
     ingest_date: Optional[str] = None,
     per_page: int = 100,
@@ -534,17 +537,32 @@ def parse_args() -> argparse.Namespace:
 
     parser.add_argument(
         "--aws-region",
-        default=os.getenv("AWS_REGION") or os.getenv("AWS_DEFAULT_REGION") or "us-east-2",
+        default=os.getenv("AWS_REGION") or os.getenv("AWS_DEFAULT_REGION") or "us-east-1",
         help="AWS region for Secrets Manager/S3 clients.",
     )
 
-    return parser.parse_args()
+    args, unknown_args = parser.parse_known_args()
+    
+    if unknown_args:
+        print(f"Ignoring unknown Glue/job arguments: {unknown_args}")
+    
+    return args
 
 
 def main() -> None:
-    load_dotenv()
+    if load_dotenv is not None:
+        load_dotenv()
 
     args = parse_args()
+
+    print("Starting Wistia ingestion job")
+    print(f"Config path: {args.config}")
+    print(f"Output dir: {args.output_dir}")
+    print(f"Secret name: {args.secret_name}")
+    print(f"AWS region: {args.aws_region}")
+    print(f"Ingest date: {args.ingest_date}")
+    print(f"Per page: {args.per_page}")
+    print(f"Max pages: {args.max_pages}")
 
     if args.secret_name:
         api_token = get_secret_value(
