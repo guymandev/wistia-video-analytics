@@ -25,6 +25,10 @@ import requests
 import yaml
 from dotenv import load_dotenv
 
+from urllib.parse import urlparse
+
+import boto3
+
 
 BASE_URL = "https://api.wistia.com/v1"
 
@@ -33,6 +37,8 @@ def load_media_config(config_path: str | Path) -> List[Dict[str, Any]]:
     """
     Load media configuration from YAML.
 
+    Supports both local paths and S3 paths.
+
     Expected YAML shape:
 
     media_ids:
@@ -40,13 +46,22 @@ def load_media_config(config_path: str | Path) -> List[Dict[str, Any]]:
         channel: YouTube
         name: Example Name
     """
-    config_path = Path(config_path)
+    config_path_str = str(config_path)
 
-    if not config_path.exists():
-        raise FileNotFoundError(f"Media config file not found: {config_path}")
+    if is_s3_path(config_path_str):
+        bucket, key = parse_s3_uri(config_path_str)
+        s3_client = boto3.client("s3")
+        response = s3_client.get_object(Bucket=bucket, Key=key)
+        config_text = response["Body"].read().decode("utf-8")
+        config = yaml.safe_load(config_text) or {}
+    else:
+        config_path = Path(config_path)
 
-    with config_path.open("r", encoding="utf-8") as file:
-        config = yaml.safe_load(file) or {}
+        if not config_path.exists():
+            raise FileNotFoundError(f"Media config file not found: {config_path}")
+
+        with config_path.open("r", encoding="utf-8") as file:
+            config = yaml.safe_load(file) or {}
 
     media_ids = config.get("media_ids")
 
@@ -58,6 +73,41 @@ def load_media_config(config_path: str | Path) -> List[Dict[str, Any]]:
             raise ValueError(f"Media config item is missing 'media_id': {item}")
 
     return media_ids
+
+
+def get_secret_value(secret_name: str, region_name: str) -> str:
+    """
+    Read a secret value from AWS Secrets Manager.
+
+    Supports either:
+    - Plain text secret containing the token directly
+    - JSON secret containing one of these keys:
+      - WISTIA_API_TOKEN
+      - wistia_api_token
+      - api_token
+      - token
+    """
+    secrets_client = boto3.client("secretsmanager", region_name=region_name)
+
+    response = secrets_client.get_secret_value(SecretId=secret_name)
+    secret_string = response.get("SecretString")
+
+    if not secret_string:
+        raise ValueError(f"Secret {secret_name} does not contain SecretString.")
+
+    try:
+        secret_payload = json.loads(secret_string)
+
+        for key in ["WISTIA_API_TOKEN", "wistia_api_token", "api_token", "token"]:
+            if key in secret_payload:
+                return str(secret_payload[key])
+
+        raise ValueError(
+            f"Secret {secret_name} is JSON but does not contain a recognized token key."
+        )
+
+    except json.JSONDecodeError:
+        return secret_string
 
 
 def build_headers(api_token: str) -> Dict[str, str]:
@@ -94,6 +144,37 @@ def build_visitors_url() -> str:
 
 def build_events_url() -> str:
     return f"{BASE_URL}/stats/events.json"
+
+
+def is_s3_path(path: str | Path) -> bool:
+    """
+    Return True if the provided path is an S3 URI.
+    """
+    return str(path).startswith("s3://")
+
+
+def parse_s3_uri(s3_uri: str | Path) -> tuple[str, str]:
+    """
+    Parse an S3 URI into bucket and key.
+
+    Example:
+    s3://my-bucket/raw/wistia/events/page=1.json
+
+    Returns:
+    ("my-bucket", "raw/wistia/events/page=1.json")
+    """
+    parsed = urlparse(str(s3_uri))
+
+    if parsed.scheme != "s3":
+        raise ValueError(f"Not a valid S3 URI: {s3_uri}")
+
+    bucket = parsed.netloc
+    key = parsed.path.lstrip("/")
+
+    if not bucket or not key:
+        raise ValueError(f"S3 URI must include bucket and key: {s3_uri}")
+
+    return bucket, key
 
 
 def fetch_json(
@@ -174,13 +255,33 @@ def fetch_events_pages(
 
 def write_json(output_path: str | Path, payload: Any) -> None:
     """
-    Write JSON payload to disk, creating parent directories as needed.
+    Write JSON payload to either local disk or S3.
+
+    Local example:
+    data/raw/wistia/events/media_id=gskhw4w4lm/ingest_date=2026-06-09/page=1.json
+
+    S3 example:
+    s3://wistia-video-analytics-guy/raw/wistia/events/media_id=gskhw4w4lm/ingest_date=2026-06-09/page=1.json
     """
+    output_path_str = str(output_path)
+    json_body = json.dumps(payload, indent=2, ensure_ascii=False)
+
+    if is_s3_path(output_path_str):
+        bucket, key = parse_s3_uri(output_path_str)
+        s3_client = boto3.client("s3")
+        s3_client.put_object(
+            Bucket=bucket,
+            Key=key,
+            Body=json_body.encode("utf-8"),
+            ContentType="application/json",
+        )
+        return
+
     output_path = Path(output_path)
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
     with output_path.open("w", encoding="utf-8") as file:
-        json.dump(payload, file, indent=2, ensure_ascii=False)
+        file.write(json_body)
 
 
 def get_raw_output_path(
@@ -189,31 +290,38 @@ def get_raw_output_path(
     ingest_date: str,
     media_id: Optional[str] = None,
     page: Optional[int] = None,
-) -> Path:
+) -> str | Path:
     """
-    Build the local raw output path.
+    Build the raw output path for either local storage or S3.
 
-    Examples:
-
-    data/raw/wistia/media_metadata/media_id=gskhw4w4lm/ingest_date=2026-06-09/response.json
-
+    Local example:
     data/raw/wistia/events/media_id=gskhw4w4lm/ingest_date=2026-06-09/page=1.json
 
-    data/raw/wistia/visitors/ingest_date=2026-06-09/response.json
+    S3 example:
+    s3://bucket/raw/wistia/events/media_id=gskhw4w4lm/ingest_date=2026-06-09/page=1.json
     """
-    path = Path(base_dir) / endpoint_name
+    base_dir_str = str(base_dir).rstrip("/")
+
+    path_parts = [endpoint_name]
 
     if media_id:
-        path = path / f"media_id={media_id}"
+        path_parts.append(f"media_id={media_id}")
 
-    path = path / f"ingest_date={ingest_date}"
+    path_parts.append(f"ingest_date={ingest_date}")
 
     if endpoint_name == "events":
         if page is None:
             raise ValueError("page is required for events output paths.")
-        return path / f"page={page}.json"
+        filename = f"page={page}.json"
+    else:
+        filename = "response.json"
 
-    return path / "response.json"
+    path_parts.append(filename)
+
+    if is_s3_path(base_dir_str):
+        return "/".join([base_dir_str, *path_parts])
+
+    return Path(base_dir_str).joinpath(*path_parts)
 
 
 def get_current_ingest_date() -> str:
@@ -418,6 +526,18 @@ def parse_args() -> argparse.Namespace:
         help="Optional maximum number of event pages to fetch per media ID.",
     )
 
+    parser.add_argument(
+        "--secret-name",
+        default=None,
+        help="Optional AWS Secrets Manager secret name containing the Wistia API token.",
+    )
+
+    parser.add_argument(
+        "--aws-region",
+        default=os.getenv("AWS_REGION") or os.getenv("AWS_DEFAULT_REGION") or "us-east-2",
+        help="AWS region for Secrets Manager/S3 clients.",
+    )
+
     return parser.parse_args()
 
 
@@ -426,10 +546,18 @@ def main() -> None:
 
     args = parse_args()
 
-    api_token = os.getenv("WISTIA_API_TOKEN")
+    if args.secret_name:
+        api_token = get_secret_value(
+            secret_name=args.secret_name,
+            region_name=args.aws_region,
+        )
+    else:
+        api_token = os.getenv("WISTIA_API_TOKEN")
+
     if not api_token:
         raise ValueError(
-            "WISTIA_API_TOKEN is not set. Add it to your .env file or shell environment."
+            "Wistia API token is not set. Provide WISTIA_API_TOKEN locally "
+            "or use --secret-name for AWS Secrets Manager."
         )
 
     base_output_dir = (
