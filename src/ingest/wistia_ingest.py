@@ -17,6 +17,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, Generator, Iterable, List, Optional, Tuple, Union
@@ -185,21 +186,77 @@ def fetch_json(
     url: str,
     headers: Dict[str, str],
     params: Optional[Dict[str, Any]] = None,
-    timeout_seconds: int = 30,
+    max_attempts: int = 4,
+    timeout_seconds: int = 60,
 ) -> Any:
     """
-    Fetch JSON from the Wistia API.
+    Fetch JSON from the Wistia API with retry handling for transient failures.
 
-    Raises an HTTPError for non-2xx responses.
+    Retries are used for:
+    - 429 rate limit
+    - 500 internal server error
+    - 502 bad gateway
+    - 503 service unavailable
+    - 504 gateway timeout
+    - network timeout / connection errors
     """
-    response = session.get(
-        url,
-        headers=headers,
-        params=params,
-        timeout=timeout_seconds,
-    )
-    response.raise_for_status()
-    return response.json()
+    retryable_status_codes = {429, 500, 502, 503, 504}
+
+    for attempt in range(1, max_attempts + 1):
+        try:
+            response = session.get(
+                url,
+                headers=headers,
+                params=params,
+                timeout=timeout_seconds,
+            )
+
+            if response.status_code in retryable_status_codes:
+                raise requests.HTTPError(
+                    f"Retryable HTTP error {response.status_code}: {response.text}",
+                    response=response,
+                )
+
+            response.raise_for_status()
+            return response.json()
+
+        except (
+            requests.Timeout,
+            requests.ConnectionError,
+            requests.HTTPError,
+        ) as error:
+            status_code = None
+
+            if isinstance(error, requests.HTTPError) and error.response is not None:
+                status_code = error.response.status_code
+
+            is_retryable_http_error = status_code in retryable_status_codes
+            is_retryable_network_error = isinstance(
+                error,
+                (requests.Timeout, requests.ConnectionError),
+            )
+
+            is_last_attempt = attempt == max_attempts
+
+            if is_last_attempt or not (
+                is_retryable_http_error or is_retryable_network_error
+            ):
+                print(
+                    f"Request failed after {attempt} attempt(s). "
+                    f"url={url}, params={params}, error={error}"
+                )
+                raise
+
+            sleep_seconds = min(2 ** attempt, 30)
+
+            print(
+                f"Retryable request failure. "
+                f"attempt={attempt}/{max_attempts}, "
+                f"sleep_seconds={sleep_seconds}, "
+                f"url={url}, params={params}, error={error}"
+            )
+
+            time.sleep(sleep_seconds)
 
 
 def fetch_events_pages(

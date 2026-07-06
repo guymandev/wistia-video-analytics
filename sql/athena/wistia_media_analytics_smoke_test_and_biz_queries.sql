@@ -266,6 +266,8 @@ SELECT
     MAX(received_at) AS last_event_at
 FROM wistia_gold.fact_media_engagement;
 
+-- misc diagnostic queries
+
 SELECT
     snapshot_date,
     channel,
