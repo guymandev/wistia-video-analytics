@@ -1,3 +1,3 @@
 # Video Walkthrough
 
-[Watch the project walkthrough](./videos/PASTE_VIDEO_LINK_HERE)
+[Watch the project walkthrough](./videos/wistia-video-analytics-walkthrough.mp4)

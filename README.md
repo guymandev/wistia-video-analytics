@@ -15,6 +15,12 @@ The primary analytical goal is to compare performance between two Wistia-hosted 
 
 The final deliverable exposes both dimensional Gold tables and business-friendly Mart tables through Athena.
 
+## Project Artifacts
+
+- [Architecture diagram](docs/architecture.md)
+- [Video walkthrough](docs/walkthrough.md)
+- [Athena smoke and business queries](sql/athena/smoke_and_business_queries.sql)
+
 ## Architecture Summary
 
 The pipeline follows this architecture:
